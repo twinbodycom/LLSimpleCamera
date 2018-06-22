@@ -6,8 +6,13 @@
 //  Copyright (c) 2014 Ömer Faruk Gül. All rights reserved.
 //
 
+#define kAccelerometerFrequency        10.0 //Hz
+
 #import "LLSimpleCamera.h"
+
+#import <CoreMotion/CoreMotion.h>
 #import <ImageIO/CGImageProperties.h>
+
 #import "UIImage+FixOrientation.h"
 #import "LLSimpleCamera+Helper.h"
 
@@ -28,6 +33,11 @@
 @property (nonatomic, assign) CGFloat beginGestureScale;
 @property (nonatomic, assign) CGFloat effectiveScale;
 @property (nonatomic, copy) void (^didRecordCompletionBlock)(LLSimpleCamera *camera, NSURL *outputFileUrl, NSError *error);
+
+//  For obtaining of device orientation even if screen orientation is locked
+@property (strong, nonatomic) CMMotionManager *motionManager;
+@property (assign, nonatomic) UIDeviceOrientation orientation;
+
 @end
 
 NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
@@ -109,6 +119,10 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
     
     // add focus box to view
     [self addDefaultFocusBox];
+    
+    if(self.useDeviceOrientation) {
+        self.motionManager = [[CMMotionManager alloc] init];
+    }
 }
 
 #pragma mark Pinch Delegate
@@ -244,7 +258,8 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
         
         if([self.session canAddInput:_videoDeviceInput]) {
             [self.session  addInput:_videoDeviceInput];
-            self.captureVideoPreviewLayer.connection.videoOrientation = [self orientationForConnection];
+            //  fix for improper preview orientation, when run video camera from landscape mode
+            self.captureVideoPreviewLayer.connection.videoOrientation = UIInterfaceOrientationPortrait;
         }
         
         // add audio if video is enabled
@@ -754,11 +769,19 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
+    
+    if(self.useDeviceOrientation) {
+        [self startMonitoring];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
+    
+    if(self.useDeviceOrientation) {
+        [self stopMonitoring];
+    }
 }
 
 - (void)viewWillLayoutSubviews
@@ -779,7 +802,12 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
     AVCaptureVideoOrientation videoOrientation = AVCaptureVideoOrientationPortrait;
     
     if(self.useDeviceOrientation) {
-        switch ([UIDevice currentDevice].orientation) {
+        UIDeviceOrientation orientation = self.orientation;
+        if (orientation == UIDeviceOrientationUnknown) {
+            orientation = [UIDevice currentDevice].orientation;
+        }
+        
+        switch (orientation) {
             case UIDeviceOrientationLandscapeLeft:
                 // yes to the right, this is not bug!
                 videoOrientation = AVCaptureVideoOrientationLandscapeRight;
@@ -874,6 +902,62 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
 + (BOOL)isRearCameraAvailable
 {
     return [UIImagePickerController isCameraDeviceAvailable:UIImagePickerControllerCameraDeviceRear];
+}
+
+#pragma mark -
+#pragma mark Obtaining of device orientation even if screen orientation is locked
+
+- (void)startMonitoring {
+    [self.motionManager startAccelerometerUpdatesToQueue:[NSOperationQueue currentQueue] withHandler:^(CMAccelerometerData * _Nullable accelerometerData, NSError * _Nullable error) {
+        
+        if (error != nil) {
+            NSLog(@"Accelerometer error: %@", error);
+        } else {
+            float const threshold = 40.0;
+            
+            BOOL (^isNearValue) (float value1, float value2) = ^BOOL(float value1, float value2) {
+                return fabsf(value1 - value2) < threshold;
+            };
+            
+            BOOL (^isNearValueABS) (float value1, float value2) = ^BOOL(float value1, float value2) {
+                return isNearValue(fabsf(value1), fabsf(value2));
+            };
+            
+            float yxAtan = (atan2(accelerometerData.acceleration.y, accelerometerData.acceleration.x)) * 180 / M_PI;
+            float zyAtan = (atan2(accelerometerData.acceleration.z, accelerometerData.acceleration.y)) * 180 / M_PI;
+            float zxAtan = (atan2(accelerometerData.acceleration.z, accelerometerData.acceleration.x)) * 180 / M_PI;
+            
+            UIDeviceOrientation orientation = self.orientation;
+            
+            if (isNearValue(-90.0, yxAtan) && isNearValueABS(180.0, zyAtan)) {
+                orientation = UIDeviceOrientationPortrait;
+            } else if (isNearValueABS(180.0, yxAtan) && isNearValueABS(180.0, zxAtan)) {
+                orientation = UIDeviceOrientationLandscapeLeft;
+            } else if (isNearValueABS(0.0, yxAtan) && isNearValueABS(0.0, zxAtan)) {
+                orientation = UIDeviceOrientationLandscapeRight;
+            } else if (isNearValue(90.0, yxAtan) && isNearValueABS(0.0, zyAtan)) {
+                orientation = UIDeviceOrientationPortraitUpsideDown;
+            } else if (isNearValue(-90.0, zyAtan) && isNearValue(-90.0, zxAtan)) {
+                orientation = UIDeviceOrientationFaceUp;
+            } else if (isNearValue(90.0, zyAtan) && isNearValue(90.0, zxAtan)) {
+                orientation = UIDeviceOrientationFaceDown;
+            }
+            
+            if (self.orientation != orientation) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self orientationDidChange:orientation];
+                });
+            }
+        }
+    }];
+}
+
+- (void)stopMonitoring {
+    [self.motionManager stopAccelerometerUpdates];
+}
+
+- (void)orientationDidChange:(UIDeviceOrientation) orientation {
+    self.orientation = orientation;
 }
 
 @end
